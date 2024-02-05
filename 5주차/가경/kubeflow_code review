@@ -1,0 +1,171 @@
+https://yangoos57.github.io/blog/mlops/kubeflow/pipeline_using_kfp_sdk/
+
+https://aws.amazon.com/ko/blogs/tech/aws-mlops-use-case/
+
+### 참고
+
+https://yangoos57.github.io/blog/mlops/kubeflow/Serving_torch_model_using_kserve/
+
+## Kubeflow로 pytorch 모델 배포하기
+
+1. kubeflow dashboard에서 스토리지 확보하기
+    
+    ![img3.png](https://prod-files-secure.s3.us-west-2.amazonaws.com/ab0a0a9f-d324-4fa3-b226-acd087d096ac/c2f28c23-22a9-49bd-9068-8f946e8e6770/img3.png)
+    
+    MAR 파일과 config.properties를 스토리지에 저장해야한다. 
+    
+    ![img4.png](https://prod-files-secure.s3.us-west-2.amazonaws.com/ab0a0a9f-d324-4fa3-b226-acd087d096ac/e0b79698-f74e-4c4a-9f3c-a149f9953841/img4.png)
+    
+    노트북 생성 시 자동으로 마운트 되는 볼륨을 제거하고 방금 생성한 볼륨으로 수정한다.
+    
+2. vol-1 폴더 접근 및 파일 생성
+    
+    vol-1폴더 내부는 pvc(스토리지)의 시작 디렉토리 와 동일한 경로이므로 해당 폴더 내부에 파일을 생성하며 pvc 내에 저장된다.
+    
+    2-1. torchserve 구동에 필요한 파일 저장
+    
+    1) config.properties
+    
+    ```python
+    inference_address=http://0.0.0.0:8085
+    management_address=http://0.0.0.0:8081
+    number_of_netty_threads=4
+    job_queue_size=100
+    enable_envvars_config=true
+    install_py_dep_per_model=true
+    model_store=model-store
+    model_snapshot={"name":"startup.cfg","modelCount":1,"models":{"bert":{"1.0":{"defaultVersion":true,"marName":"bert-model.mar","minWorkers":1,"maxWorkers":5,"batchSize":1,"maxBatchDelay":5000,"responseTimeout":120}}}}
+    ```
+    
+    2) MAR file
+    
+    - 사전작업
+    
+    model, tokenizer, handler가 있는 폴더에서 아래의 작성 실행
+    
+    ```bash
+    pip install torchserve torch-model-archiver torch-workflow-archiver
+    ```
+    
+    ```bash
+    torch-model-archiver --model-name bert-model --version 1.0 --serialized-file pytorch_model.bin  --handler "handler.py" --extra-files "config.json,vocab.txt"
+    ```
+    
+    --serialized-file pytorch_model.bin
+    --handler "handler.py"
+    --extra-files
+    "config.json,vocab.txt"
+    
+    부분을 자신이 저장한 파일명으로 변경
+    
+    - MAR 파일
+    
+    ```json
+    {
+        "createdOn": "17/01/2023 18:36:16",
+      "runtime": "python",
+      "model": {
+          "modelName": "bert-model",
+        "serializedFile": "pytorch_model.bin",
+        "handler": "handler.py",
+        "modelVersion": "1.0"
+      },
+      "archiverVersion": "0.7.0"
+    }
+    ```
+    
+3. yaml 파일 생성
+    
+    ```yaml
+    apiVersion: "serving.kserve.io/v1beta1"
+    kind: "InferenceService"
+    metadata:
+      name: "torchserve" # 배포 모델명
+    spec:
+      predictor:
+        model:
+          modelFormat:
+            name: pytorch
+          storageUri: "pvc://leeway" # mar-store, config 폴더가 있는 경로
+          protocolVersion: v1
+          resources:
+            limits:
+              cpu: 2
+              memory: 2Gi
+            requests:
+              cpu: 0.5
+              memory: 0.5Gi
+    ```
+    
+    name, storage uri를 개인 설정에 맞게 변경한다.
+    
+    경로 설정시 vol-1 폴더는 경로에 포함하지 않는다 (관물 용도, 실제 폴더 아님)
+    
+    - yaml 파일 제출 (k9s)
+        
+        yaml 파일 실행 후 에러 체크
+        
+        - k9s 실행 후 shift+a
+        - predictor pod 실행
+    
+    ![img6.png](https://prod-files-secure.s3.us-west-2.amazonaws.com/ab0a0a9f-d324-4fa3-b226-acd087d096ac/07e5fea4-4369-4de5-abed-a906b3df2970/img6.png)
+    
+    ![img7.png](https://prod-files-secure.s3.us-west-2.amazonaws.com/ab0a0a9f-d324-4fa3-b226-acd087d096ac/242d4843-8ec0-418b-a4b7-b0eb1cb9be46/img7.png)
+    
+    ![img8.png](https://prod-files-secure.s3.us-west-2.amazonaws.com/ab0a0a9f-d324-4fa3-b226-acd087d096ac/0669e926-8af6-4616-b080-9792b951b9ca/img8.png)
+    
+    inference 모델 정상 배포 확인 완료
+    
+4. 외부에서 모델로 요청 보내기
+- sample.json
+
+```json
+{
+  "instances": [{ "data": "Hello World!" }]
+}
+```
+
+- MODEL_NAME
+    
+    [config.properties](http://config.properties)에 저장된 모델명
+    
+- Session
+    
+    인증용 쿠키
+    
+    kubeflow→개발자 도구→애플리케이션→쿠키→authservice_session
+    
+    ![img9.png](https://prod-files-secure.s3.us-west-2.amazonaws.com/ab0a0a9f-d324-4fa3-b226-acd087d096ac/66a67fed-546e-4367-bede-07ea1a5c1803/img9.png)
+    
+- SERVICE_HOSTNAME
+    
+    {모델명}.{namespace}.example.com
+    
+    모델명 - 업로드한 yaml 이름(torchserve)
+    
+
+```bash
+# model 업로드에 사용한 모델명 X, config.properties에서 설정한 모델명 O
+export MODEL_NAME=bert
+# Auth Session key 브라우저 개발자도구 => 애플리케이션 => 쿠키 => authservice_session
+export SESSION=MTY3NDU0NjAyMnxOd3dBTkVjMVJGSlZTa1kzVVVkT1EwcElRME5GTWxWS1FWbEtWRUUzVVZKTVVFWktXREpZVUZGTk5rMUNWbG8wUnpaV1NrVlZUMUU9fKlskygrmWOb_KaYh0CfGGToaDzJHVf_fojh2ppH4-FT
+# {yaml에 작성한 모델명}.{namespace}.example.com
+export SERVICE_HOSTNAME=torchserve.kubeflow-user-example-com.example.com
+```
+
+- 모델 요청
+
+```bash
+### HTTP 사용 시
+curl -v -X POST -H "Host: ${SERVICE_HOSTNAME}" -H "Cookie: authservice_session=${SESSION}" http://localhost:8080/v1/models/${MODEL_NAME}:predict -T sample.json
+### HTTPS 사용 시
+curl -k -v -X POST -H "Host: ${SERVICE_HOSTNAME}" -H "Cookie: authservice_session=${SESSION}" https://localhost:8080/v1/models/${MODEL_NAME}:predict -T sample.json
+# request 결과
+>>> {"predictions": [4]}
+```
+
+### Kserve Container
+
+![img1.png](https://prod-files-secure.s3.us-west-2.amazonaws.com/ab0a0a9f-d324-4fa3-b226-acd087d096ac/652b9950-d48f-4040-a5ef-95359e2908f9/img1.png)
+
+사용자는 Kserve를 활용해 모델을 배포함으로서 외부 통신을 위한 서버 구축 과정을 생략할 수 있다.
